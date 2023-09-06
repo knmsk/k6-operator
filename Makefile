@@ -14,7 +14,8 @@ BUNDLE_METADATA_OPTS ?= $(BUNDLE_CHANNELS) $(BUNDLE_DEFAULT_CHANNEL)
 # Image to use for building Go
 GO_BUILDER_IMG ?= "golang:1.18"
 # Image URL to use all building/pushing image targets
-IMG ?= ghcr.io/grafana/k6-operator:latest
+IMG_NAME ?= ghcr.io/grafana/k6-operator
+IMG_TAG ?= latest
 # Default dockerfile to build
 DOCKERFILE ?= "Dockerfile.controller"
 # Produce CRDs that work back to Kubernetes 1.11 (no version conversion)
@@ -36,6 +37,7 @@ GOOS=$(shell go env GOOS)
 GOARCH=$(shell go env GOARCH)
 KUBEBUILDER_ASSETS_ROOT=/tmp
 KUBEBUILDER_ASSETS=$(KUBEBUILDER_ASSETS_ROOT)/kubebuilder/bin
+
 test: generate fmt vet manifests
 	export KUBEBUILDER_ASSETS=$(KUBEBUILDER_ASSETS); setup-envtest use --use-env -p env $(ENVTEST_K8S_VERSION); go test ./... -coverprofile cover.out
 
@@ -77,7 +79,7 @@ uninstall: manifests kustomize
 
 # Deploy controller in the configured Kubernetes cluster in ~/.kube/config
 deploy: manifests kustomize
-	cd config/manager && $(KUSTOMIZE) edit set image controller=${IMG}
+	cd config/manager && $(KUSTOMIZE) edit set image controller=${IMG_NAME}:${IMG_TAG}
 	$(KUSTOMIZE) build config/default | kubectl apply -f -
 
 # Delete operator from a cluster
@@ -102,11 +104,11 @@ generate: controller-gen
 
 # Build the docker image
 docker-build: test
-	docker build . -t ${IMG} -f ${DOCKERFILE} --build-arg GO_BUILDER_IMG=${GO_BUILDER_IMG}
+	docker build . -t ${IMG_NAME}:${IMG_TAG} -f ${DOCKERFILE} --build-arg GO_BUILDER_IMG=${GO_BUILDER_IMG}
 
 # Push the docker image
 docker-push:
-	docker push ${IMG}
+	docker push ${IMG_NAME}:${IMG_TAG}
 
 # find or download controller-gen
 # download controller-gen if necessary
@@ -144,7 +146,7 @@ endif
 .PHONY: bundle
 bundle: manifests
 	operator-sdk generate kustomize manifests -q
-	cd config/manager && $(KUSTOMIZE) edit set image controller=$(IMG)
+	cd config/manager && $(KUSTOMIZE) edit set image controller=${IMG_NAME}:${IMG_TAG}
 	$(KUSTOMIZE) build config/manifests | operator-sdk generate bundle -q --overwrite --version $(VERSION) $(BUNDLE_METADATA_OPTS)
 	operator-sdk bundle validate ./bundle
 
@@ -152,3 +154,38 @@ bundle: manifests
 .PHONY: bundle-build
 bundle-build:
 	docker build -f bundle.Dockerfile -t $(BUNDLE_IMG) .
+
+# ===============================================================
+# This section is only about the HELM deployment of the operator
+# ===============================================================
+
+e2e-helm: deploy-helm
+	kubectl create configmap crocodile-stress-test --from-file e2e/test.js
+	kubectl apply -f e2e/test.yaml
+
+# Deploy controller in the configured Kubernetes cluster in ~/.kube/config
+deploy-helm: manifests helm
+	$(HELM) upgrade --install --wait k6-operator ./charts -f ./charts/values.yaml --set manager.image.name=$(IMG_NAME) --set manager.image.tag=$(IMG_TAG)
+
+helm-template: manifests helm
+	$(HELM) template k6-operator ./charts -f ./charts/values.yaml --set manager.image.name=$(IMG_NAME) --set manager.image.tag=$(IMG_TAG)
+
+# Delete operator from a cluster
+delete-helm: manifests helm
+	$(HELM) uninstall k6-operator
+
+helm:
+ifeq (, $(shell which helm))
+	@{ \
+	set -e ;\
+	HELM_GEN_TMP_DIR=$$(mktemp -d) ;\
+	cd $$HELM_GEN_TMP_DIR ;\
+	curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+	chmod 700 get_helm.sh ;\
+	./get_helm.sh ;\
+	rm -rf $$HELM_GEN_TMP_DIR ;\
+	}
+HELM=$(shell which helm)
+else
+HELM=$(shell which helm)
+endif
